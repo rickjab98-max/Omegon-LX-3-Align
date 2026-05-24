@@ -1,0 +1,382 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Omegon LX3 Polar Aligner</title>
+    <style>
+        :root {
+            /* Standard: Astro-Rotlicht */
+            --primary: #ff3333;
+            --bg: #000000;
+            --text: #ff3333;
+            --alert: #ffaa00;
+        }
+
+        body.match {
+            /* Ziel erreicht: Grün */
+            --primary: #33ff33;
+            --text: #33ff33;
+        }
+
+        * {
+            box-sizing: border-box;
+            user-select: none;
+        }
+
+        body {
+            margin: 0;
+            padding: 15px;
+            background-color: var(--bg);
+            color: var(--text);
+            font-family: 'Courier New', Courier, monospace;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            height: 100vh;
+            overflow: hidden;
+            transition: background-color 0.3s, color 0.3s;
+        }
+
+        /* Kamera Hintergrund */
+        #camera-bg {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100vw;
+            height: 100vh;
+            object-fit: cover;
+            z-index: -1;
+            opacity: 0.2;
+            display: none;
+        }
+
+        /* Header / Controls */
+        header {
+            width: 100%;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+            z-index: 10;
+        }
+
+        button {
+            background: transparent;
+            border: 1px solid var(--primary);
+            color: var(--primary);
+            padding: 10px 15px;
+            font-family: inherit;
+            font-weight: bold;
+            border-radius: 5px;
+            cursor: pointer;
+        }
+
+        button:active {
+            background: var(--primary);
+            color: var(--bg);
+        }
+
+        .status-box {
+            border: 1px solid var(--primary);
+            padding: 10px;
+            width: 100%;
+            text-align: center;
+            margin-bottom: 20px;
+            border-radius: 5px;
+            background: rgba(0, 0, 0, 0.5);
+            z-index: 10;
+        }
+
+        .huge-number {
+            font-size: 3.5rem;
+            font-weight: bold;
+            margin: 10px 0;
+        }
+
+        /* Wasserwaage / Spirit Level */
+        .level-container {
+            width: 200px;
+            height: 200px;
+            border: 3px solid var(--primary);
+            border-radius: 50%;
+            position: relative;
+            margin: 20px 0;
+            background: rgba(0, 0, 0, 0.6);
+            z-index: 10;
+        }
+
+        .crosshair {
+            position: absolute;
+            background: rgba(255, 51, 51, 0.5);
+        }
+        body.match .crosshair { background: rgba(51, 255, 51, 0.5); }
+
+        .crosshair.horizontal { top: 50%; left: 0; width: 100%; height: 2px; transform: translateY(-50%); }
+        .crosshair.vertical { top: 0; left: 50%; width: 2px; height: 100%; transform: translateX(-50%); }
+
+        /* Ziel-Toleranz-Kreis (±0.5 Grad) */
+        .tolerance-circle {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            width: 40px; /* Skaliert auf Toleranz */
+            height: 40px;
+            border: 2px dashed var(--primary);
+            border-radius: 50%;
+            transform: translate(-50%, -50%);
+        }
+
+        .bubble {
+            width: 24px;
+            height: 24px;
+            background: var(--primary);
+            border-radius: 50%;
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            transition: top 0.05s ease-out, left 0.05s ease-out;
+            box-shadow: 0 0 10px var(--primary);
+        }
+
+        /* Pfeile für Neigung */
+        .direction-arrow {
+            font-size: 2rem;
+            font-weight: bold;
+            height: 40px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin: 10px 0;
+            z-index: 10;
+        }
+
+        #error-log {
+            color: var(--alert);
+            font-size: 0.8rem;
+            text-align: center;
+            margin-top: auto;
+            max-width: 100%;
+            word-wrap: break-word;
+        }
+
+        .hidden { display: none !important; }
+    </style>
+</head>
+<body>
+
+    <video id="camera-bg" autoplay playsinline></video>
+
+    <header>
+        <button id="btn-camera">Kamera An/Aus</button>
+        <div id="compass">Azimut: ---°</div>
+    </header>
+
+    <div class="status-box">
+        <div>Ziel-Inklination (Breitengrad):</div>
+        <div id="target-lat" class="huge-number">--.-°</div>
+    </div>
+
+    <div class="direction-arrow" id="arrow-up"></div>
+
+    <div class="level-container">
+        <div class="crosshair horizontal"></div>
+        <div class="crosshair vertical"></div>
+        <div class="tolerance-circle"></div>
+        <div class="bubble" id="bubble"></div>
+    </div>
+
+    <div class="direction-arrow" id="arrow-down"></div>
+
+    <div class="status-box">
+        <div>Aktuelle Neigung (Pitch):</div>
+        <div id="current-pitch" class="huge-number">--.-°</div>
+        <div id="planarity-status">Planarität (Roll): --.-°</div>
+        <div id="match-text" style="font-weight: bold; margin-top: 10px;"></div>
+    </div>
+
+    <div id="error-log">Initialisiere Sensoren... (Bitte Standort erlauben)</div>
+
+    <script>
+        // --- Variablen ---
+        let targetLatitude = null;
+        let currentPitch = 0; // beta
+        let currentRoll = 0;  // gamma
+        let currentHeading = 0; // alpha
+        let cameraStream = null;
+
+        const TOLERANCE_MATCH = 0.2; // Exakter Match (Grün)
+        const TOLERANCE_PLANAR = 0.5; // Akzeptabel flach
+        const BUBBLE_SCALE = 15; // Pixel pro Grad (Empfindlichkeit der Wasserwaage)
+
+        // --- DOM Elemente ---
+        const domTargetLat = document.getElementById('target-lat');
+        const domCurrentPitch = document.getElementById('current-pitch');
+        const domPlanarity = document.getElementById('planarity-status');
+        const domCompass = document.getElementById('compass');
+        const domBubble = document.getElementById('bubble');
+        const domArrowUp = document.getElementById('arrow-up');
+        const domArrowDown = document.getElementById('arrow-down');
+        const domMatchText = document.getElementById('match-text');
+        const domErrorLog = document.getElementById('error-log');
+        const videoElement = document.getElementById('camera-bg');
+        const btnCamera = document.getElementById('btn-camera');
+
+        // --- 1. Standort / Breitengrad abfragen ---
+        function getGeolocation() {
+            if ("geolocation" in navigator) {
+                navigator.geolocation.getCurrentPosition(
+                    (position) => {
+                        targetLatitude = position.coords.latitude;
+                        domTargetLat.innerText = `${targetLatitude.toFixed(1)}°`;
+                        log(`Standort erfasst: ${targetLatitude.toFixed(4)}°`);
+                    },
+                    (error) => {
+                        log(`Standort-Fehler: ${error.message}. Bitte manuell erlauben.`);
+                    },
+                    { enableHighAccuracy: true }
+                );
+            } else {
+                log("Geolocation wird von diesem Browser nicht unterstützt.");
+            }
+        }
+
+        // --- 2. Sensor Fusion / Device Orientation ---
+        function handleOrientation(event) {
+            // beta: Front/Back tilt [-180, 180] -> Inklination
+            // gamma: Left/Right tilt [-90, 90] -> Planarität
+            // alpha: Compass direction [0, 360]
+            
+            if (event.beta === null || event.gamma === null) return;
+
+            currentPitch = event.beta;
+            currentRoll = event.gamma;
+
+            // Heading ermitteln (Android nutzt oft event.alpha im absolute mode, iOS webkitCompassHeading)
+            if (event.webkitCompassHeading) {
+                currentHeading = event.webkitCompassHeading;
+            } else if (event.alpha) {
+                // Bei Android mit 'deviceorientationabsolute' ist alpha geerdet.
+                // Invertieren für Standard-Kompass-Gefühl je nach Ausrichtung.
+                currentHeading = 360 - event.alpha; 
+            }
+
+            updateUI();
+        }
+
+        function initSensors() {
+            // Bevorzuge das Absolute Event für Android (Nord-Bezug)
+            if ('ondeviceorientationabsolute' in window) {
+                window.addEventListener('deviceorientationabsolute', handleOrientation);
+                log("Sensoren (Absolute) aktiv.");
+            } else if ('ondeviceorientation' in window) {
+                window.addEventListener('deviceorientation', handleOrientation);
+                log("Sensoren (Relativ) aktiv.");
+            } else {
+                log("DeviceOrientation API nicht verfügbar.");
+            }
+        }
+
+        // --- 3. UI Updates & Logik ---
+        function updateUI() {
+            if (targetLatitude === null) return; // Warten auf Standort
+
+            // Pitch & Roll auf 1 Dezimalstelle runden
+            const pitchFixed = currentPitch.toFixed(1);
+            const rollFixed = currentRoll.toFixed(1);
+            
+            domCurrentPitch.innerText = `${pitchFixed}°`;
+            domPlanarity.innerText = `Planarität (Roll): ${rollFixed}°`;
+            domCompass.innerText = `Azimut: ${(currentHeading % 360).toFixed(0)}°`;
+
+            // Deltas berechnen
+            const deltaPitch = currentPitch - targetLatitude;
+            const isPlanar = Math.abs(currentRoll) <= TOLERANCE_PLANAR;
+            const isPitchMatch = Math.abs(deltaPitch) <= TOLERANCE_MATCH;
+            const isPerfectMatch = isPlanar && isPitchMatch;
+
+            // Pfeile aktualisieren
+            if (isPitchMatch) {
+                domArrowUp.innerHTML = "";
+                domArrowDown.innerHTML = "";
+            } else if (deltaPitch < 0) {
+                // Pitch ist kleiner als Target -> Steiler machen
+                domArrowUp.innerHTML = "↑ STEILER NEIGEN ↑";
+                domArrowDown.innerHTML = "";
+            } else {
+                // Pitch ist größer -> Flacher machen
+                domArrowUp.innerHTML = "";
+                domArrowDown.innerHTML = "↓ FLACHER NEIGEN ↓";
+            }
+
+            // Wasserwaage (Bubble) bewegen
+            // X-Achse: Roll (Gamma)
+            // Y-Achse: Delta Pitch (Beta - Target)
+            let bubbleX = 50 + (currentRoll * BUBBLE_SCALE);
+            let bubbleY = 50 + (deltaPitch * BUBBLE_SCALE);
+
+            // Begrenzen, damit die Blase nicht aus dem div fliegt
+            bubbleX = Math.max(0, Math.min(100, bubbleX));
+            bubbleY = Math.max(0, Math.min(100, bubbleY));
+
+            domBubble.style.left = `${bubbleX}%`;
+            domBubble.style.top = `${bubbleY}%`;
+
+            // Match Logic -> UI auf Grün wechseln
+            if (isPerfectMatch) {
+                document.body.classList.add('match');
+                domMatchText.innerText = "MATCH! TRACKER PERFEKT EINGENORDET!";
+            } else {
+                document.body.classList.remove('match');
+                if (!isPlanar) {
+                    domMatchText.innerText = "Achtung: Handy nicht plan! (Links/Rechts kippen)";
+                } else {
+                    domMatchText.innerText = "Planarität OK. Neigung anpassen...";
+                }
+            }
+        }
+
+        // --- 4. Kamera Overlay ---
+        btnCamera.addEventListener('click', async () => {
+            if (cameraStream) {
+                // Kamera ausschalten
+                let tracks = cameraStream.getTracks();
+                tracks.forEach(track => track.stop());
+                videoElement.style.display = 'none';
+                cameraStream = null;
+                btnCamera.innerText = "Kamera An";
+                log("Kamera deaktiviert.");
+            } else {
+                // Kamera einschalten
+                try {
+                    cameraStream = await navigator.mediaDevices.getUserMedia({
+                        video: { facingMode: "environment" }
+                    });
+                    videoElement.srcObject = cameraStream;
+                    videoElement.style.display = 'block';
+                    btnCamera.innerText = "Kamera Aus";
+                    log("Kamera aktiv.");
+                } catch (err) {
+                    log(`Kamerafehler: ${err.message}`);
+                }
+            }
+        });
+
+        // --- Hilfsfunktionen ---
+        function log(msg) {
+            domErrorLog.innerText = msg;
+            console.log(msg);
+        }
+
+        // --- Init ---
+        window.onload = () => {
+            if (window.isSecureContext === false) {
+                log("WARNUNG: Kein HTTPS erkannt. Sensoren könnten blockiert werden!");
+            }
+            getGeolocation();
+            initSensors();
+        };
+    </script>
+</body>
+</html>
